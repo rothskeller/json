@@ -32,7 +32,7 @@ type Handlers struct {
 	// Bool is called when a JSON boolean is encountered.
 	Bool func(bool)
 	// Object is called when a JSON object is encountered.
-	Object func() KeyHandler
+	Object func(key string) Handlers
 	// Array is called when a JSON array is encountered.  It should return
 	// the handlers used to parse the array elements.
 	Array func() Handlers
@@ -43,10 +43,6 @@ func (h Handlers) empty() bool {
 		h.String == nil && h.Time == nil && h.Bool == nil &&
 		h.Object == nil && h.Array == nil
 }
-
-// A KeyHandler is a function that maps an object key to the handlers used to
-// parse its value.
-type KeyHandler func(string) Handlers
 
 // NewReader returns a Reader reading the provided stream.
 func NewReader(reader io.Reader) *Reader {
@@ -156,16 +152,12 @@ func (h *Reader) parseOne(handlers Handlers) {
 
 func (h *Reader) parseObject(handlers Handlers) {
 	var (
-		hf        KeyHandler
 		vhandlers Handlers
 		r         rune
 	)
 	if handlers.Object == nil && !handlers.Ignore {
 		h.Raise("unexpected '{' in JSON")
 		return
-	}
-	if !handlers.Ignore {
-		hf = handlers.Object()
 	}
 	h.skipWhitespace()
 	if r = h.readRune(false); r == 0 || r == '}' {
@@ -177,7 +169,7 @@ func (h *Reader) parseObject(handlers Handlers) {
 			if handlers.Ignore {
 				vhandlers = handlers
 			} else {
-				vhandlers = hf(key)
+				vhandlers = handlers.Object(key)
 			}
 			if vhandlers.empty() {
 				h.Raise("unexpected key \"" + key + "\" in JSON")
@@ -408,4 +400,27 @@ func (h *Reader) parseString(handlers Handlers) {
 		return
 	}
 	h.Raise("unexpected string in JSON")
+}
+
+// Shortcut functions to generate handlers for common cases.
+func RejectHandler() Handlers                        { return Handlers{} }
+func IgnoreHandler() Handlers                        { return Handlers{Ignore: true} }
+func NullHandler(f func()) Handlers                  { return Handlers{Null: f} }
+func IntHandler(f func(int)) Handlers                { return Handlers{Int: f} }
+func FloatHandler(f func(float64)) Handlers          { return Handlers{Float: f} }
+func StringHandler(f func(string)) Handlers          { return Handlers{String: f} }
+func TimeHandler(f func(time.Time)) Handlers         { return Handlers{Time: f} }
+func BoolHandler(f func(bool)) Handlers              { return Handlers{Bool: f} }
+func ObjectHandler(f func(string) Handlers) Handlers { return Handlers{Object: f} }
+func ArrayHandler(f func() Handlers) Handlers        { return Handlers{Array: f} }
+func IntNullHandler(f func(int)) Handlers            { return Handlers{Int: f, Null: func() { f(0) }} }
+func FloatNullHandler(f func(float64)) Handlers      { return Handlers{Float: f, Null: func() { f(0.0) }} }
+func StringNullHandler(f func(string)) Handlers      { return Handlers{String: f, Null: func() { f("") }} }
+func TimeNullHandler(f func(time.Time)) Handlers {
+	return Handlers{Time: f, Null: func() { f(time.Time{}) }}
+}
+func BoolNullHandler(f func(bool)) Handlers              { return Handlers{Bool: f, Null: func() { f(false) }} }
+func ObjectNullHandler(f func(string) Handlers) Handlers { return Handlers{Object: f, Null: func() {}} }
+func ArrayNullHandler(f func() Handlers) Handlers {
+	return Handlers{Array: f, Null: func() {}}
 }
