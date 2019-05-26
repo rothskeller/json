@@ -1,4 +1,4 @@
-package jwriter
+package json
 
 import (
 	"bufio"
