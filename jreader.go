@@ -2,33 +2,35 @@ package json
 
 import (
 	"bufio"
-	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 )
 
 // A Handlers structure defines how parsed JSON is handled.  Any field which is
 // nil implies that JSON element is not valid in the current parsing context.
 type Handlers struct {
+	// Ignore causes the value to be ignored.  None of the rest of the
+	// Handlers fields are meaningful when this is set.
+	Ignore bool
 	// Null is called when a JSON null is encountered.
-	Null func() error
+	Null func()
 	// Int is called when a JSON number without a fractional part is
 	// encountered.
-	Int func(int) error
+	Int func(int)
 	// Float is called when a JSON number is encountered (unless Int is
 	// non-nil and the number has no fractional part).
-	Float func(float64) error
+	Float func(float64)
 	// String is called when a JSON string is encountered (unless Time is
 	// non-nil and the string looks like an RFC3339 timestamp).
-	String func(string) error
+	String func(string)
 	// Time is called when a JSON string is encountered that can be parsed
 	// as an RFC3339 timestamp.
-	Time func(time.Time) error
+	Time func(time.Time)
 	// Bool is called when a JSON boolean is encountered.
-	Bool func(bool) error
+	Bool func(bool)
 	// Object is called when a JSON object is encountered.
 	Object func() KeyHandler
 	// Array is called when a JSON array is encountered.  It should return
@@ -37,7 +39,7 @@ type Handlers struct {
 }
 
 func (h Handlers) empty() bool {
-	return h.Null == nil && h.Int == nil && h.Float == nil &&
+	return !h.Ignore && h.Null == nil && h.Int == nil && h.Float == nil &&
 		h.String == nil && h.Time == nil && h.Bool == nil &&
 		h.Object == nil && h.Array == nil
 }
@@ -46,253 +48,317 @@ func (h Handlers) empty() bool {
 // parse its value.
 type KeyHandler func(string) Handlers
 
-// Parse reads the input stream until EOF, and uses the supplied handlers to
-// parse it.  It returns an error if it hits a JSON syntax error, if it hits a
-// JSON element for which no handler was provided, or if a handler returns an
+// NewReader returns a Reader reading the provided stream.
+func NewReader(reader io.Reader) *Reader {
+	return &Reader{r: bufio.NewReader(reader), line: 1, col: 1}
+}
+
+// A Reader is a JSON stream reader and parser.
+type Reader struct {
+	r    *bufio.Reader
+	line int
+	col  int
+	err  error
+}
+
+// Raise raises an error in the reader, causing its Read method to return the
 // error.
-func Parse(reader io.Reader, handlers Handlers) (err error) {
+func (h *Reader) Raise(err string) {
+	if h.err == nil {
+		h.err = fmt.Errorf("%s at %d:%d", err, h.line, h.col)
+	}
+}
+
+// Read reads the input stream until EOF, and uses the supplied handlers to
+// parse it.  It returns an error if it hits a JSON syntax error, if it hits a
+// JSON element for which no handler was provided, or if a handler called Raise.
+func (h *Reader) Read(handlers Handlers) (err error) {
 	var (
-		br *bufio.Reader
-		r  rune
+		r rune
 	)
-	br = bufio.NewReader(reader)
-	if err = parseOne(br, handlers); err != nil {
-		return err
+	h.parseOne(handlers)
+	if h.err != nil {
+		return h.err
 	}
 	for {
-		r, _, err = br.ReadRune()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if !unicode.IsSpace(r) {
-			return errors.New("extra text after JSON")
-		}
-	}
-}
-
-func parseOne(reader *bufio.Reader, handlers Handlers) (err error) {
-	var r rune
-
-	skipWhitespace(reader)
-	if r, _, err = reader.ReadRune(); err != nil {
-		return err
-	}
-	switch {
-	case r == '{':
-		return parseObject(reader, handlers)
-	case r == '[':
-		return parseArray(reader, handlers)
-	case r >= '0' && r <= '9', r == '-':
-		reader.UnreadRune()
-		return parseNumber(reader, handlers)
-	case r == 't', r == 'f', r == 'n':
-		reader.UnreadRune()
-		return parseKeyword(reader, handlers)
-	case r == '"':
-		return parseString(reader, handlers)
-	default:
-		return errors.New("JSON syntax error")
-	}
-}
-
-func skipWhitespace(reader *bufio.Reader) {
-	for {
-		r, _, err := reader.ReadRune()
-		if err != nil {
-			return
+		if r = h.readRune(true); r == 0 {
+			return h.err
 		}
 		if r != ' ' && r != '\t' && r != '\r' && r != '\n' {
-			reader.UnreadRune()
+			h.Raise("extra text after JSON")
+			break
+		}
+	}
+	return h.err
+}
+
+func (h *Reader) readRune(allowEOF bool) (r rune) {
+	var err error
+
+	r, _, err = h.r.ReadRune()
+	if err == io.EOF && allowEOF {
+		return 0
+	}
+	if err != nil {
+		h.err = err
+		return 0
+	}
+	if r == '\n' {
+		h.line++
+		h.col = 1
+	} else {
+		h.col++
+	}
+	return r
+}
+
+func (h *Reader) unreadRune() {
+	h.r.UnreadRune()
+	h.col--
+}
+
+func (h *Reader) skipWhitespace() {
+	for {
+		switch r := h.readRune(false); r {
+		case 0:
+			return
+		case ' ', '\t', '\r', '\n':
+			h.unreadRune()
 			return
 		}
 	}
 }
 
-func parseObject(reader *bufio.Reader, handlers Handlers) (err error) {
+func (h *Reader) parseOne(handlers Handlers) {
+	var r rune
+
+	h.skipWhitespace()
+	r = h.readRune(false)
+	switch {
+	case r == 0:
+		break
+	case r == '{':
+		h.parseObject(handlers)
+	case r == '[':
+		h.parseArray(handlers)
+	case r >= '0' && r <= '9', r == '-':
+		h.unreadRune()
+		h.parseNumber(handlers)
+	case r == 't', r == 'f', r == 'n':
+		h.unreadRune()
+		h.parseKeyword(handlers)
+	case r == '"':
+		h.parseString(handlers)
+	default:
+		h.Raise("syntax error in JSON")
+	}
+}
+
+func (h *Reader) parseObject(handlers Handlers) {
 	var (
 		hf        KeyHandler
 		vhandlers Handlers
 		r         rune
 	)
-	if handlers.Object == nil {
-		return errors.New("unexpected '{' in JSON")
+	if handlers.Object == nil && !handlers.Ignore {
+		h.Raise("unexpected '{' in JSON")
+		return
 	}
-	hf = handlers.Object()
-	skipWhitespace(reader)
-	if r, _, err = reader.ReadRune(); err != nil {
-		return err
+	if !handlers.Ignore {
+		hf = handlers.Object()
 	}
-	if r == '}' {
-		return nil
+	h.skipWhitespace()
+	if r = h.readRune(false); r == 0 || r == '}' {
+		return
 	}
-	reader.UnreadRune()
-	for {
-		if err = parseOne(reader, Handlers{String: func(key string) error {
-			vhandlers = hf(key)
-			if vhandlers.empty() {
-				return errors.New("unexpected key \"" + key + "\" in JSON")
+	h.unreadRune()
+	for h.err == nil {
+		h.parseOne(Handlers{String: func(key string) {
+			if handlers.Ignore {
+				vhandlers = handlers
+			} else {
+				vhandlers = hf(key)
 			}
-			skipWhitespace(reader)
-			if r, _, err = reader.ReadRune(); err != nil {
-				return err
+			if vhandlers.empty() {
+				h.Raise("unexpected key \"" + key + "\" in JSON")
+				return
+			}
+			h.skipWhitespace()
+			if r = h.readRune(false); r == 0 {
+				return
 			}
 			if r != ':' {
-				return errors.New("expected ':' in JSON")
+				h.Raise("expected ':' in JSON")
+				return
 			}
-			if err = parseOne(reader, vhandlers); err != nil {
-				return err
+			h.parseOne(vhandlers)
+			if h.err != nil {
+				return
 			}
-			return nil
-		}}); err != nil {
-			return err
+		}})
+		if h.err != nil {
+			return
 		}
-		skipWhitespace(reader)
-		if r, _, err = reader.ReadRune(); err != nil {
-			return err
-		}
-		if r == '}' {
-			return nil
+		h.skipWhitespace()
+		if r = h.readRune(false); r == 0 || r == '}' {
+			return
 		}
 		if r != ',' {
-			return errors.New("expected '}' or ',' in JSON")
+			h.Raise("expected '}' or ',' in JSON")
+			return
 		}
 	}
 }
 
-func parseArray(reader *bufio.Reader, handlers Handlers) (err error) {
+func (h *Reader) parseArray(handlers Handlers) {
 	var (
 		vhandlers Handlers
 		r         rune
 	)
-	if handlers.Array == nil {
-		return errors.New("unexpected '[' in JSON")
+	if handlers.Array == nil && !handlers.Ignore {
+		h.Raise("unexpected '[' in JSON")
+		return
 	}
-	vhandlers = handlers.Array()
-	skipWhitespace(reader)
-	if r, _, err = reader.ReadRune(); err != nil {
-		return err
+	if handlers.Ignore {
+		vhandlers = handlers
+	} else {
+		vhandlers = handlers.Array()
 	}
-	if r == ']' {
-		return nil
+	h.skipWhitespace()
+	if r = h.readRune(false); r == 0 || r == ']' {
+		return
 	}
-	reader.UnreadRune()
+	h.unreadRune()
 	for {
-		if err = parseOne(reader, vhandlers); err != nil {
-			return err
+		h.parseOne(vhandlers)
+		if h.err != nil {
+			return
 		}
-		skipWhitespace(reader)
-		if r, _, err = reader.ReadRune(); err != nil {
-			return err
-		}
-		if r == ']' {
-			return nil
+		h.skipWhitespace()
+		if r = h.readRune(false); r == 0 || r == ']' {
+			return
 		}
 		if r != ',' {
-			return errors.New("expected ']' or ',' in JSON")
+			h.Raise("expected ']' or ',' in JSON")
+			return
 		}
 	}
 }
 
-func parseNumber(reader *bufio.Reader, handlers Handlers) (err error) {
+func (h *Reader) parseNumber(handlers Handlers) {
 	var (
 		buf [64]byte
-		b   byte
+		r   rune
 		num = buf[:0]
 	)
 	for {
-		b, err = reader.ReadByte()
-		if err == io.EOF {
+		if r = h.readRune(true); r == 0 {
 			break
 		}
-		if err != nil {
-			return err
-		}
-		if strings.IndexByte("0123456789-+eE.", b) < 0 {
-			reader.UnreadByte()
+		if strings.IndexRune("0123456789-+eE.", r) < 0 {
+			h.unreadRune()
 			break
 		}
-		num = append(num, b)
+		num = append(num, byte(r))
+	}
+	if h.err != nil || handlers.Ignore {
+		return
 	}
 	if handlers.Int != nil {
 		if i, err := strconv.Atoi(string(num)); err == nil {
-			return handlers.Int(i)
+			handlers.Int(i)
+			return
+		} else if handlers.Float == nil {
+			h.Raise("JSON number is not an integer")
+			return
 		}
 	}
 	if handlers.Float != nil {
 		if f, err := strconv.ParseFloat(string(num), 64); err == nil {
-			return handlers.Float(f)
+			handlers.Float(f)
+			return
 		}
-		return errors.New("invalid JSON number")
+		h.Raise("invalid JSON number")
+		return
 	}
-	return errors.New("unexpected number in JSON")
+	h.Raise("unexpected number in JSON")
 }
 
-func parseKeyword(reader *bufio.Reader, handlers Handlers) (err error) {
+func (h *Reader) parseKeyword(handlers Handlers) {
 	var (
 		buf [5]byte
-		b   byte
+		r   rune
 		kw  = buf[:0]
 	)
 	for {
-		b, err = reader.ReadByte()
-		if err == io.EOF {
+		if r = h.readRune(true); r == 0 {
 			break
 		}
-		if err != nil {
-			return err
-		}
-		if strings.IndexByte("aeflnrstu", b) < 0 {
-			reader.UnreadByte()
+		if strings.IndexRune("aeflnrstu", r) < 0 {
+			h.unreadRune()
 			break
 		}
-		kw = append(kw, b)
+		kw = append(kw, byte(r))
 	}
 	switch string(kw) {
 	case "true":
-		if handlers.Bool != nil {
-			return handlers.Bool(true)
+		if handlers.Ignore {
+			return
 		}
-		return errors.New("unexpected Boolean in JSON")
+		if handlers.Bool != nil {
+			handlers.Bool(true)
+			return
+		}
+		h.Raise("unexpected Boolean in JSON")
+		return
 	case "false":
+		if handlers.Ignore {
+			return
+		}
 		if handlers.Bool != nil {
-			return handlers.Bool(false)
+			handlers.Bool(false)
+			return
 		}
-		return errors.New("unexpected Boolean in JSON")
+		h.Raise("unexpected Boolean in JSON")
+		return
 	case "null":
-		if handlers.Null != nil {
-			return handlers.Null()
+		if handlers.Ignore {
+			return
 		}
-		return errors.New("unexpected null in JSON")
+		if handlers.Null != nil {
+			handlers.Null()
+			return
+		}
+		h.Raise("unexpected null in JSON")
+		return
 	}
-	return errors.New("unquoted string in JSON")
+	h.Raise("unquoted string in JSON")
 }
 
-func parseString(reader *bufio.Reader, handlers Handlers) (err error) {
+func (h *Reader) parseString(handlers Handlers) {
 	var (
 		sb strings.Builder
 		s  string
 		r  rune
-		h  [4]byte
+		u  [4]byte
 	)
 	for {
-		if r, _, err = reader.ReadRune(); err != nil {
-			return err
+		if r = h.readRune(false); r == 0 {
+			return
 		}
 		if r == '"' {
 			break
 		}
 		if r < 32 {
-			return errors.New("unexpected control character in JSON string")
+			h.Raise("unexpected control character in JSON string")
+			return
 		}
 		if r != '\\' {
 			sb.WriteRune(r)
 			continue
 		}
-		if r, _, err = reader.ReadRune(); err != nil {
-			return err
+		if r = h.readRune(false); r == 0 {
+			return
 		}
 		switch r {
 		case '"', '\\', '/':
@@ -308,28 +374,38 @@ func parseString(reader *bufio.Reader, handlers Handlers) (err error) {
 		case 't':
 			sb.WriteByte('\t')
 		case 'u':
-			if n, err := reader.Read(h[:]); err != nil {
-				return err
+			if n, err := h.r.Read(u[:]); err != nil {
+				h.err = err
+				return
 			} else if n != 4 {
-				return errors.New("invalid Unicode escape in JSON string")
+				h.Raise("invalid Unicode escape in JSON string")
+				return
 			}
-			if i, err := strconv.ParseInt(string(h[:]), 16, 32); err != nil {
-				return errors.New("invalid Unicode escape in JSON string")
+			h.col += 4
+			if i, err := strconv.ParseInt(string(u[:]), 16, 32); err != nil {
+				h.Raise("invalid Unicode escape in JSON string")
+				return
 			} else {
 				sb.WriteRune(rune(i))
 			}
 		default:
-			return errors.New("unexpected escape sequence in JSON string")
+			h.Raise("unexpected escape sequence in JSON string")
+			return
 		}
 	}
 	s = sb.String()
 	if handlers.Time != nil {
 		if t, err := time.Parse(time.RFC3339, s); err == nil {
-			return handlers.Time(t)
+			handlers.Time(t)
+			return
+		} else if handlers.String == nil {
+			h.Raise("invalid time string in JSON")
+			return
 		}
 	}
 	if handlers.String != nil {
-		return handlers.String(s)
+		handlers.String(s)
+		return
 	}
-	return errors.New("unexpected string in JSON")
+	h.Raise("unexpected string in JSON")
 }

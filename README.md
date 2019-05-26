@@ -67,20 +67,25 @@ also offers `NewGzipWriter`, which gzips the JSON output on the fly.
 
 ## Parsing JSON
 
-To parse a JSON stream, call `Parse`, and give it a `Handlers` structure telling
-it how to handle the JSON that it finds.  The `Handlers` structure has one or
-more of the following functions:
+To parse a JSON stream, call `NewReader` with an input stream.  Then call `Read`
+on that reader, and give it a `Handlers` structure telling it how to handle the
+JSON that it finds.  The `Handlers` structure has the following functions:
 
-* `Null() error`
-* `Int(i int) error`
-* `Float(f float64) error`
-* `String(s string) error`
-* `Time(t time.Time) error`
-* `Bool(b bool) error`
+* `Null()`
+* `Int(i int)`
+* `Float(f float64)`
+* `String(s string)`
+* `Time(t time.Time)`
+* `Bool(b bool)`
 * `Object() KeyHandler`
 * `Array() Handlers`
 
-`Parse` will call the correct function for whatever it finds in the JSON.  Note
+It also has an `Ignore` boolean; if set, the JSON item being parsed is ignored
+(recursively).
+
+`Read` will call the correct function for whatever it finds in the JSON.  Note
 that `Array` returns a new set of handlers to parse the elements of the array,
 and `Object` returns a `KeyHandler` function (`func (key string) Handlers`),
-which provides the handlers for parsing a particular object key.
+which provides the handlers for parsing a particular object key.  Any of the
+handler functions can abort the parsing by passing an error message to the
+`Raise` method of the reader.
