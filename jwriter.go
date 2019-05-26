@@ -65,6 +65,7 @@ type writer struct {
 // Close flushes the JSON output.  The Writer must not be used again after Close
 // is called.
 func (jw *writer) Close() {
+	jw.w.WriteByte('\n')
 	jw.w.Flush()
 	writerPool.Put(jw)
 }

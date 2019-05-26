@@ -119,6 +119,8 @@ func (h *Reader) skipWhitespace() {
 		case 0:
 			return
 		case ' ', '\t', '\r', '\n':
+			break
+		default:
 			h.unreadRune()
 			return
 		}
@@ -211,17 +213,17 @@ func (h *Reader) parseArray(handlers Handlers) {
 		h.Raise("unexpected '[' in JSON")
 		return
 	}
-	if handlers.Ignore {
-		vhandlers = handlers
-	} else {
-		vhandlers = handlers.Array()
-	}
 	h.skipWhitespace()
 	if r = h.readRune(false); r == 0 || r == ']' {
 		return
 	}
 	h.unreadRune()
 	for {
+		if handlers.Ignore {
+			vhandlers = handlers
+		} else {
+			vhandlers = handlers.Array()
+		}
 		h.parseOne(vhandlers)
 		if h.err != nil {
 			return
