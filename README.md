@@ -64,3 +64,23 @@ also offers `NewGzipWriter`, which gzips the JSON output on the fly.
 * `Close()`  
   Flushes the output and recycles the internal buffers.  Do not make any calls
   to the `Writer` after calling `Close`.
+
+## Parsing JSON
+
+To parse a JSON stream, call `Parse`, and give it a `Handlers` structure telling
+it how to handle the JSON that it finds.  The `Handlers` structure has one or
+more of the following functions:
+
+* `Null() error`
+* `Int(i int) error`
+* `Float(f float64) error`
+* `String(s string) error`
+* `Time(t time.Time) error`
+* `Bool(b bool) error`
+* `Object() KeyHandler`
+* `Array() Handlers`
+
+`Parse` will call the correct function for whatever it finds in the JSON.  Note
+that `Array` returns a new set of handlers to parse the elements of the array,
+and `Object` returns a `KeyHandler` function (`func (key string) Handlers`),
+which provides the handlers for parsing a particular object key.
