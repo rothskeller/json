@@ -387,6 +387,9 @@ func (h *Reader) parseString(handlers Handlers) {
 			return
 		}
 	}
+	if handlers.Ignore {
+		return
+	}
 	s = sb.String()
 	if handlers.Time != nil {
 		if t, err := time.Parse(time.RFC3339, s); err == nil {
